@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* === ШРИФТЫ === */
+:root {
+  --font-manrope: 'Manrope', sans-serif;
+}
+
+/* === ОСНОВНОЕ ОФОРМЛЕНИЕ === */
+html,
+body {
+  height: 100%;
+  background-color: #f8f9fc;
+  -webkit-tap-highlight-color: transparent;
+  font-family: var(--font-manrope);
+  color: #1a1a1a;
+}
+
+/* === СКРОЛЛ === */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  background: #d4d7dd;
+  border-radius: 8px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #c0c3ca;
+}
+
+/* === АНИМАЦИИ === */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.fade-in {
+  animation: fade-in 0.3s ease forwards;
+}
+
+/* === ДОП. ВИЗУАЛЬНЫЕ ДЕТАЛИ === */
+.shadow-soft {
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.06);
+}
+
+.rounded-3xl {
+  border-radius: 1.25rem;
+}
+
+/* === АДАПТИВ === */
+@media (max-width: 768px) {
+  body {
+    font-size: 15px;
+  }
+}

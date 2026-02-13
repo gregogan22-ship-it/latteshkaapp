@@ -1,0 +1,21 @@
+'use client';
+
+import { Construction, Coffee } from 'lucide-react';
+
+export default function ProizvodstvoPage() {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-orange-50 to-amber-50 pb-20">
+      <div className="pt-12 px-6 text-center">
+        <Construction className="w-32 h-32 text-orange-500 mx-auto mb-8" />
+        <h1 className="text-4xl font-bold text-orange-600 mb-4">Цех</h1>
+        <p className="text-xl text-gray-600 mb-8">Производство и заготовки</p>
+        <div className="bg-white/90 backdrop-blur rounded-3xl shadow-2xl p-12 max-w-2xl mx-auto">
+          <h2 className="text-3xl font-bold text-gray-800 mb-6">В разработке</h2>
+          <p className="text-lg text-gray-600">
+            Скоро здесь будет управление рецептурами, заготовками и контролем качества
+          </p>
+        </div>
+      </div>
+    </div>
+  );
+}

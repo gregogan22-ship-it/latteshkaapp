@@ -1,0 +1,984 @@
+/**************************************
+ * CHECKLIST SAVER — RU (v4.5 — с полным логированием и правильным пользователем)
+ * Вкладка = дата. Колонки A–J:
+ * A Время | B Роль | C Категория | D Пункт
+ * E Фото  | F Комментарий | G Статус | H Выполнил | I itemId | J ФИО
+ **************************************/
+
+/*************** НАСТРОЙКИ ***************/
+const CAFE_SHEETS = {
+  "Ашан":     "1KtMaKdO8Mf3rC_p7GwzNST-rnw8apbWE-LS9R6Qz4EE",
+  "Кипарис 1":"1kBoCW4XOe0rqf6Rr5JtAeNKDbdiEm_2h04IkaP2-uVM",
+  "Эссе":     "1UeFGetg6_5GbuJudXZrepRUcfm1IeImBbFpJNDxM0d8",
+  "Кофеин":   "1LpGd5gpCqahM8OiUj9pyDo7SoL5xPYdsLOHtovOobWA",
+  "Аптека":   "12HoP8SaqNWis675KDV9kV8_TvCdWq6mOrcghp6Nvotc",
+  "Адидас":   "1z2-6PxSVH2RdO54xltIDKJmRD-v4g9XTlRy-7y-Mlgc",
+  "Тренева":  "17GprO47f9iNKLrDFKbHZaBgRtXTjAuIuUGfTx0xPaXA",
+  "КМ":       "1q03FR_wbih5odAJyLUsMaD-_X37QaReqfIV7dDWwFl8",
+  "ЦУМ":      "1OViIGzGMG_aOWjmJEEJFDeUngfSQ3LqZiILO4mWy3E0",
+  "Ленина":   "1HA3nQDFCVG5qsjbEiPZV9eyK28WAtNLPlNJ_PqSC-58",
+  "Кипарис 2":"16inhU9izGJ-X-w_OchcPkk4yL04xhuutSLqPyQ7NIyM"
+};
+
+const SPECIAL_MANAGER_SHEET_ID = "1opwpmX5GLPPHRZ90ov89K1IgPi46Tv9ckY8KvHGDZ6Q"; // новая таблица для специальных чек-листов менеджера
+
+const CREATE_SHEET_IF_MISSING = true;
+const HEADER_ROW = 1;
+const DATA_START_ROW = 2;
+
+const RU_HEADERS = ["Время","Роль","Категория","Пункт","Фото","Комментарий","Статус","Выполнил","itemId","ФИО"];
+
+const PHOTO_FOLDER_ID = "1rOtPYzyYTkHj_J5JCJAJKhIOZQm5RFOL";
+
+const STATUS_TRUE  = "Выполнено";
+const STATUS_FALSE = "Не выполнено";
+
+// ID таблицы для логов
+const LOG_SHEET_ID = "1CdI98yQzh4dQXNjXeVuNV4faGm8NryyQOGyMn1Gpw4Q";
+
+// ID таблицы для задач
+const TASKS_SHEET_ID = "1QTBFgjepMWBhQ_hj2WNhLOoFRMq1VrJZaZX5uTLIjEw";
+
+// ID таблицы для токенов QR-входа
+const TOKENS_SHEET_ID = "12_OJUrwXA00NcMBFm9P7pFPxWA_9rxnHnPZj6_Cn-lA";
+const TOKENS_SHEET_NAME = "Токены";
+
+/***************** ЛОГИРОВАНИЕ ******************/
+function logAction_(cafe, user, action, details = "") {
+  if (!LOG_SHEET_ID) return;
+
+  try {
+    const ss = SpreadsheetApp.openById(LOG_SHEET_ID);
+    let logSheet = ss.getSheetByName("Журнал");
+    if (!logSheet) {
+      logSheet = ss.insertSheet("Журнал");
+      logSheet.appendRow(["Время", "Кофейня", "Пользователь", "Действие", "Детали"]);
+    }
+
+    const now = new Date();
+    const formattedTime = Utilities.formatDate(now, Session.getScriptTimeZone(), "dd.MM.yyyy HH:mm:ss");
+
+    logSheet.appendRow([formattedTime, cafe || "неизвестно", user || "неизвестно", action, details]);
+  } catch (e) {
+    console.error("Ошибка логирования:", e);
+  }
+}
+
+/***************** HTTP ******************/
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData?.contents || "{}");
+    const action = String(payload.action || "").toLowerCase();
+
+    // Правильный пользователь
+    const user = payload.user || payload.login || "неизвестно";
+    const cafe = payload.cafe || "неизвестно";
+
+    // Информативное действие
+    let actionName = "ДЕЙСТВИЕ: " + action.toUpperCase();
+    if (action === "save") actionName = "СОХРАНЕНИЕ ЧЕК-ЛИСТА";
+    if (action === "upload") actionName = "ЗАГРУЗКА ФОТО";
+    if (action === "ping") actionName = "PING";
+    if (action === "addtask") actionName = "ПОСТАНОВКА ЗАДАЧИ МЕНЕДЖЕРОМ";
+    if (action === "addselftask") actionName = "ДОБАВЛЕНИЕ СВОЕЙ ЗАДАЧИ";
+    if (action === "toggletaskdone") actionName = "ОТМЕТКА ЗАДАЧИ ВЫПОЛНЕННОЙ";
+    if (action === "completetaskfromchecklist") actionName = "ВЫПОЛНЕНИЕ ЗАДАЧИ С АВТОЗАВЕРШЕНИЕМ ПУНКТА";
+    if (action === "generatetoken") actionName = "ГЕНЕРАЦИЯ QR-ТОКЕНА";
+    if (action === "validatetoken") actionName = "ПРОВЕРКА QR-ТОКЕНА";
+    if (action === "checkspecialstatus") return json_(checkSpecialChecklistStatus(payload));
+
+    const details = action === "save" 
+      ? `Пунктов: ${payload.entries?.length || 0}, фото: ${payload.entries?.filter(e => e.photoUrl).length || 0}`
+      : action === "upload" 
+        ? payload.fileName || "фото"
+        : action === "addtask"
+          ? `Пункт: ${payload.itemId}, комментарий: ${payload.task?.comment}`
+          : action === "addselftask"
+            ? `Задача: ${payload.text}`
+            : action === "completetaskfromchecklist"
+              ? `Задача ID: ${payload.taskId}`
+            : action === "generatetoken"
+              ? `Для сотрудника: ${payload.employeeLogin}`
+            : JSON.stringify(payload).substring(0, 300);
+
+    logAction_(cafe, user, actionName, details);
+
+    if (action === "ping") {
+      return json_({ ok: true, pong: true, now: new Date().toISOString() });
+    }
+    if (action === "get") {
+      return json_({ ok: true, ...getChecklist_(payload) });
+    }
+    if (action === "save") {
+      return json_({ ok: true, ...saveChecklistUpsert_(payload) });
+    }
+    if (action === "upload") {
+      return json_({ ok: true, ...uploadPhoto_(payload) });
+    }
+    if (action === "log") {
+      logAction_(payload.cafe || "неизвестно", payload.user || "неизвестно", "ВХОД В ПРИЛОЖЕНИЕ", payload.details || "");
+      return json_({ ok: true });
+    }
+    if (action === "addtask") {
+      return json_(addTask(payload));
+    }
+    if (action === "gettasks") {
+      return json_(getTasks(payload));
+    }
+    if (action === "addselftask") {
+      return json_(addSelfTask(payload));
+    }
+    if (action === "toggletaskdone") {
+      return json_(toggleTaskDone(payload));
+    }
+    if (action === "completetaskfromchecklist") {
+      return json_(completeTaskFromChecklist(payload));
+    }
+    if (action === "generatetoken") {
+      return json_(generateToken(payload));
+    }
+    if (action === "validatetoken") {
+      return json_(validateToken(payload));
+    }
+    if (action === "checkspecialstatus") {
+      return json_(checkSpecialChecklistStatus(payload));
+    }
+
+    return json_({ ok: false, error: "Unknown action", action });
+  } catch (err) {
+    logAction_("неизвестно", "неизвестно", "ОШИБКА POST", String(err));
+    return json_({ ok: false, error: String(err) });
+  }
+}
+
+function doGet(e) {
+  try {
+    const p = (e && e.parameter) ? e.parameter : {};
+    const action = String(p.action || "get").toLowerCase();
+
+    logAction_(p.cafe || "неизвестно", "браузер", `ПРОСМОТР: ${action.toUpperCase()}`, JSON.stringify(p).substring(0, 200));
+
+    if (action === "ping") {
+      return json_({ ok: true, pong: true, now: new Date().toISOString() });
+    }
+
+    if (action === "get") {
+      return json_({ ok: true, ...getChecklist_(p) });
+    }
+
+    if (action === "stats") {
+      return json_(getChecklistStats(p));
+    }
+
+    return json_({ ok: false, error: "Unknown action", action });
+  } catch (err) {
+    logAction_("неизвестно", "неизвестно", "ОШИБКА GET", String(err));
+    return json_({ ok: false, error: String(err) });
+  }
+}
+
+// === ЗАДАЧИ — отдельная таблица ===
+
+// Получить задачи для пользователя
+function getTasks(payload) {
+  try {
+    const userLogin = payload.login;
+    if (!userLogin) return { ok: false, error: "Не авторизован" };
+
+    const ss = SpreadsheetApp.openById(TASKS_SHEET_ID);
+    const sheet = ss.getSheetByName(userLogin);
+    if (!sheet) return { ok: true, tasks: [] };
+
+    const data = sheet.getDataRange().getValues();
+    if (data.length < 2) return { ok: true, tasks: [] };
+
+    const tasks = [];
+    for (let i = 1; i < data.length; i++) {
+      const row = data[i];
+      tasks.push({
+        id: row[0],
+        createdAt: row[1],
+        from: row[2],
+        cafe: row[3],
+        role: row[4],
+        category: row[5],
+        itemText: row[6],
+        text: row[7],
+        done: row[8] === true,
+      });
+    }
+
+    return { ok: true, tasks };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+// Добавить свою задачу
+function addSelfTask(payload) {
+  try {
+    const userLogin = payload.login;
+    const text = payload.text?.trim();
+    const cafe = payload.cafe || "";
+
+    if (!userLogin || !text) return { ok: false, error: "Недостаточно данных" };
+
+    const ss = SpreadsheetApp.openById(TASKS_SHEET_ID);
+    let sheet = ss.getSheetByName(userLogin);
+    if (!sheet) {
+      sheet = ss.insertSheet(userLogin);
+      sheet.appendRow(["ID", "Дата создания", "От кого", "Кофейня", "Роль", "Категория", "Пункт", "Задача", "Выполнена"]);
+    }
+
+    const id = Utilities.getUuid();
+    const now = new Date();
+
+    sheet.appendRow([id, now, userLogin, cafe, "", "", "", text, false]);
+
+    return { ok: true, id };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+// Отметить задачу выполненной (обычная)
+function toggleTaskDone(payload) {
+  try {
+    const id = payload.id;
+    const userLogin = payload.login;
+    const done = payload.done === true;
+
+    if (!id || !userLogin) return { ok: false, error: "Недостаточно данных" };
+
+    const ss = SpreadsheetApp.openById(TASKS_SHEET_ID);
+    const sheet = ss.getSheetByName(userLogin);
+    if (!sheet) return { ok: false, error: "Вкладка не найдена" };
+
+    const data = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < data.length; i++) {
+      if (data[i][0] === id) {
+        sheet.getRange(i + 1, 9).setValue(done);
+        if (done) {
+          sheet.getRange(i + 1, 10).setValue(new Date());
+        } else {
+          sheet.getRange(i + 1, 10).setValue("");
+        }
+
+        logAction_("", userLogin, done ? "ВЫПОЛНЕНИЕ ЗАДАЧИ" : "СНЯТИЕ ОТМЕТКИ", `ID: ${id}`);
+
+        return { ok: true };
+      }
+    }
+
+    return { ok: false, error: "Задача не найдена" };
+  } catch (err) {
+    console.error("Ошибка в toggleTaskDone:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
+// === НОВАЯ ФУНКЦИЯ: ВЫПОЛНЕНИЕ ЗАДАЧИ С АВТОЗАВЕРШЕНИЕМ ПУНКТА В ЧЕК-ЛИСТЕ ===
+function completeTaskFromChecklist(payload) {
+  try {
+    const taskId = payload.taskId;
+    const userLogin = payload.login;
+    const comment = payload.comment || "";
+    const photoUrls = Array.isArray(payload.photoUrls) ? payload.photoUrls : [];
+
+    if (!taskId || !userLogin) return { ok: false, error: "Недостаточно данных" };
+
+    const ssTasks = SpreadsheetApp.openById(TASKS_SHEET_ID);
+    const sheetTasks = ssTasks.getSheetByName(userLogin);
+    if (!sheetTasks) return { ok: false, error: "Вкладка не найдена" };
+
+    const dataTasks = sheetTasks.getDataRange().getValues();
+    let foundRow = -1;
+    let cafe, dateStr, role, category, itemText;
+
+    for (let i = 1; i < dataTasks.length; i++) {
+      if (dataTasks[i][0] === taskId) {
+        foundRow = i + 1;
+        cafe = dataTasks[i][3];
+        role = dataTasks[i][4];
+        category = dataTasks[i][5];
+        itemText = dataTasks[i][6]; // текст пункта
+        dateStr = dataTasks[i][1]; // дата создания задачи — не дата чек-листа!
+        break;
+      }
+    }
+
+    if (foundRow === -1) return { ok: false, error: "Задача не найдена" };
+
+    // Отмечаем задачу выполненной
+    sheetTasks.getRange(foundRow, 9).setValue(true);
+    sheetTasks.getRange(foundRow, 10).setValue(new Date());
+
+    // Если задача от менеджера — ищем пункт в чек-листе и выполняем его
+    if (cafe && role && category && itemText) {
+      // Нужно знать дату чек-листа — она не хранится в задаче. Можно передавать с фронта или искать по itemId
+      // Пока пропустим — реализуем позже или передадим date из фронта
+      // Для теста — предположим, что дата — текущая
+      const todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy");
+
+      const ssCheck = SpreadsheetApp.openById(CAFE_SHEETS[cafe]);
+      const sheetCheck = ssCheck.getSheetByName(todayStr);
+      if (sheetCheck) {
+        const dataCheck = sheetCheck.getDataRange().getValues();
+        const headersCheck = dataCheck[0];
+        const itemIdx = headersCheck.indexOf("Пункт");
+        const statusIdx = headersCheck.indexOf("Статус");
+        const commentIdx = headersCheck.indexOf("Комментарий");
+        const photoIdx = headersCheck.indexOf("Фото");
+        const performerIdx = headersCheck.indexOf("Выполнил");
+        const timeIdx = headersCheck.indexOf("Время");
+
+        let checkRow = -1;
+        for (let i = 1; i < dataCheck.length; i++) {
+          if (String(dataCheck[i][itemIdx]).trim() === String(itemText).trim() &&
+              String(dataCheck[i][headersCheck.indexOf("Роль")]).trim() === role &&
+              String(dataCheck[i][headersCheck.indexOf("Категория")]).trim() === category) {
+            checkRow = i + 1;
+            break;
+          }
+        }
+
+        if (checkRow !== -1) {
+          const now = new Date();
+          sheetCheck.getRange(checkRow, timeIdx + 1).setValue(now);
+          sheetCheck.getRange(checkRow, statusIdx + 1).setValue("Выполнено");
+          sheetCheck.getRange(checkRow, performerIdx + 1).setValue(userLogin);
+          if (comment) sheetCheck.getRange(checkRow, commentIdx + 1).setValue(comment);
+          if (photoUrls.length > 0) {
+            sheetCheck.getRange(checkRow, photoIdx + 1).setValue(photoUrls.join("\n"));
+          }
+        }
+      }
+    }
+
+    return { ok: true };
+  } catch (err) {
+    console.error("Ошибка в completeTaskFromChecklist:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
+// === ПОСТАНОВКА ЗАДАЧИ МЕНЕДЖЕРОМ — с текстом пункта ===
+function addTask(payload) {
+  try {
+    const cafe = payload.cafe;
+    const dateStr = payload.date; // dd.mm.yyyy
+    const role = payload.role;
+    const category = payload.category;
+    const itemId = payload.itemId;
+    const itemText = payload.itemText || ""; // текст пункта
+    const task = payload.task; // { comment, requireNewPhoto, from, createdAt }
+    const managerLogin = payload.managerLogin || "менеджер";
+
+    if (!cafe || !dateStr || !role || !category || !itemId || !task || !task.comment) {
+      return { ok: false, error: "Недостаточно данных для задачи" };
+    }
+
+    // Находим сотрудника
+    const ssCheck = SpreadsheetApp.openById(CAFE_SHEETS[cafe]);
+    const sheetCheck = ssCheck.getSheetByName(dateStr);
+    if (!sheetCheck) {
+      return { ok: false, error: "Лист с датой не найден" };
+    }
+
+    const dataCheck = sheetCheck.getDataRange().getValues();
+    const headersCheck = dataCheck[0];
+    const itemIdIdx = headersCheck.indexOf("itemId");
+    const performedByIdx = headersCheck.indexOf("Выполнил");
+    const statusIdx = headersCheck.indexOf("Статус");
+
+    if (itemIdIdx === -1 || performedByIdx === -1) {
+      return { ok: false, error: "Колонки не найдены" };
+    }
+
+    let employeeLogin = "";
+    let foundRow = -1;
+    for (let i = 1; i < dataCheck.length; i++) {
+      if (String(dataCheck[i][itemIdIdx]).trim() === String(itemId).trim()) {
+        employeeLogin = String(dataCheck[i][performedByIdx]).trim();
+        foundRow = i + 1;
+        break;
+      }
+    }
+
+    if (!employeeLogin) {
+      return { ok: false, error: "Не найден сотрудник, выполнивший пункт" };
+    }
+
+    // Сохраняем задачу на вкладку сотрудника
+    const ssTasks = SpreadsheetApp.openById(TASKS_SHEET_ID);
+    let sheetTasks = ssTasks.getSheetByName(employeeLogin);
+    if (!sheetTasks) {
+      sheetTasks = ssTasks.insertSheet(employeeLogin);
+      sheetTasks.appendRow(["ID", "Дата создания", "От кого", "Кофейня", "Роль", "Категория", "Пункт", "Задача", "Выполнена", "Дата выполнения"]);
+    }
+
+    const id = Utilities.getUuid();
+    const now = new Date();
+
+    const taskText = `${task.comment}${task.requireNewPhoto ? " (требуется новое фото)" : ""}`;
+
+    sheetTasks.appendRow([
+      id,
+      now,
+      task.from || managerLogin,
+      cafe,
+      role,
+      category,
+      itemText,
+      taskText,
+      false,
+      ""
+    ]);
+
+    // Сбрасываем статус, если требуется новое фото
+    if (task.requireNewPhoto && foundRow !== -1) {
+      sheetCheck.getRange(foundRow, statusIdx + 1).setValue("");
+    }
+
+    logAction_(cafe, managerLogin, "ПОСТАНОВКА ЗАДАЧИ", `Сотруднику ${employeeLogin}: "${task.comment}" (пункт: ${itemText})`);
+
+    return { ok: true };
+  } catch (err) {
+    console.error("Ошибка в addTask:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
+// === ФУНКЦИИ ДЛЯ QR-ТОКЕНОВ ===
+
+// Генерация нового токена (только владелец)
+function generateToken(payload) {
+  try {
+    const ownerLogin = payload.ownerLogin;
+    const employeeLogin = payload.employeeLogin?.trim();
+
+    // Проверка, что это владелец (замени на реальный логин владельца!)
+    if (!ownerLogin || ownerLogin !== "твой_логин_владельца") {
+      return { ok: false, error: "Только владелец может генерировать токены" };
+    }
+
+    if (!employeeLogin) {
+      return { ok: false, error: "Укажите логин сотрудника" };
+    }
+
+    const ss = SpreadsheetApp.openById(TOKENS_SHEET_ID);
+    let sheet = ss.getSheetByName(TOKENS_SHEET_NAME);
+    if (!sheet) {
+      sheet = ss.insertSheet(TOKENS_SHEET_NAME);
+      sheet.appendRow(["Логин сотрудника", "Токен", "Дата создания", "Создал (логин)", "Активен", "Примечание"]);
+    }
+
+    // Отзываем все старые токены этого сотрудника
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][0]).trim() === employeeLogin) {
+        sheet.getRange(i + 1, 5).setValue("Нет"); // деактивируем
+      }
+    }
+
+    // Создаём новый токен
+    const newToken = Utilities.getUuid(); // уникальный бессрочный токен
+    const now = new Date();
+
+    sheet.appendRow([
+      employeeLogin,
+      newToken,
+      now,
+      ownerLogin,
+      "Да",
+      "QR для входа"
+    ]);
+
+    logAction_("система", ownerLogin, "ГЕНЕРАЦИЯ QR-ТОКЕНА", `Для сотрудника ${employeeLogin}`);
+
+    return { ok: true, token: newToken };
+  } catch (err) {
+    console.error("Ошибка generateToken:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
+// Проверка токена при сканировании QR
+function validateToken(payload) {
+  try {
+    const token = payload.token?.trim();
+    if (!token) return { ok: false, error: "Токен не передан" };
+
+    const ss = SpreadsheetApp.openById(TOKENS_SHEET_ID);
+    const sheet = ss.getSheetByName(TOKENS_SHEET_NAME);
+    if (!sheet) return { ok: false, error: "Таблица токенов не найдена" };
+
+    const data = sheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+      if (String(data[i][1]).trim() === token && data[i][4] === "Да") {
+        const employeeLogin = String(data[i][0]).trim();
+
+        // Возвращаем данные для входа (можно расширить)
+        return {
+          ok: true,
+          auth: {
+            login: employeeLogin,
+            role: "checklist", // или роль из таблицы сотрудников
+            cafe: "Ленина", // или подтянуть
+            fullName: employeeLogin, // можно подтянуть из таблицы сотрудников
+            position: "Сотрудник"
+          }
+        };
+      }
+    }
+
+    return { ok: false, error: "Токен недействителен или отозван" };
+  } catch (err) {
+    console.error("Ошибка validateToken:", err);
+    return { ok: false, error: String(err) };
+  }
+}
+
+// === НОВАЯ ФУНКЦИЯ: ПРОВЕРКА ВЫПОЛНЕНИЯ СПЕЦИАЛЬНОГО ЧЕК-ЛИСТА ЗА СЕГОДНЯ ===
+function checkSpecialChecklistStatus(payload) {
+  try {
+    const cafe = payload.cafe;
+    const checklistType = payload.checklistType; // "reports" или "cleaning"
+    const todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy");
+
+    if (!cafe || !checklistType) return { ok: false, error: "Недостаточно данных" };
+
+    let ss;
+    if (cafe === "Менеджер") {
+      ss = SpreadsheetApp.openById(SPECIAL_MANAGER_SHEET_ID);
+    } else {
+      ss = SpreadsheetApp.openById(CAFE_SHEETS[cafe]);
+    }
+
+    const sheet = ss.getSheetByName(todayStr);
+    if (!sheet) return { ok: true, completed: false }; // нет листа — не выполнен
+
+    const data = sheet.getDataRange().getValues();
+    if (data.length < 2) return { ok: true, completed: false };
+
+    const headers = data[0];
+    const roleIdx = headers.indexOf("Роль");
+    const categoryIdx = headers.indexOf("Категория");
+    const statusIdx = headers.indexOf("Статус");
+
+    if (roleIdx === -1 || categoryIdx === -1 || statusIdx === -1) {
+      return { ok: false, error: "Не найдены колонки" };
+    }
+
+    let total = 0;
+    let completed = 0;
+
+    data.slice(1).forEach(row => {
+      const role = row[roleIdx];
+      const category = row[categoryIdx];
+      const status = row[statusIdx];
+
+      if (role === "Менеджер" && category.toLowerCase().includes(checklistType.toLowerCase())) {
+        total++;
+        if (status === STATUS_TRUE) completed++;
+      }
+    });
+
+    return { ok: true, completed: total > 0 && completed === total };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}
+
+function getChecklist_(payload) {
+  const cafe = normalizeCafe_(payload.cafe);
+  const dateStr = String(payload.date || "").trim();
+  const filterRole = String(payload.role || "").trim();
+  const filterCat  = String(payload.category || "").trim();
+
+  let ss;
+  let sheetNamePrefix = "";
+
+  // Поддержка специальной таблицы для менеджера
+  if (cafe === "Менеджер" || payload.isSpecialManager) {
+    ss = SpreadsheetApp.openById(SPECIAL_MANAGER_SHEET_ID);
+    sheetNamePrefix = "Manager_"; // если ты используешь префикс при сохранении
+  } else if (CAFE_SHEETS[cafe]) {
+    ss = SpreadsheetApp.openById(CAFE_SHEETS[cafe]);
+  } else {
+    throw new Error(`Неизвестная кофейня: "${cafe}"`);
+  }
+
+  if (!dateStr) throw new Error("Не передана дата (payload.date)");
+
+  const sh = ss.getSheetByName(sheetNamePrefix + dateStr);
+  if (!sh) return { cafe, sheet: dateStr, count: 0, entries: [] };
+
+  ensureHeadersRu_(sh);
+  const lastRow = sh.getLastRow();
+  if (lastRow < DATA_START_ROW) return { cafe, sheet: dateStr, count: 0, entries: [] };
+
+  const values = sh.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, RU_HEADERS.length).getValues();
+  const tz = Session.getScriptTimeZone();
+
+  const entries = [];
+  for (let i = 0; i < values.length; i++) {
+    const row = DATA_START_ROW + i;
+    const [time, role, cat, item, photo, comment, status, performer, itemId, fio] = values[i];
+
+    if (filterRole && String(role).trim() !== filterRole) continue;
+    if (filterCat  && String(cat).trim()  !== filterCat)  continue;
+
+    const timeStr =
+      time instanceof Date
+        ? Utilities.formatDate(time, tz, "dd.MM.yyyy HH:mm:ss")
+        : (time ? String(time) : "");
+
+    entries.push({
+      row,
+      timeStr,
+      role,
+      category: cat,
+      itemTitle: item,
+      itemId: itemId || "",
+      photoUrl: photo,
+      comment,
+      status,
+      done: isDone_(status),
+      performedBy: performer,
+      fio: fio || ""
+    });
+  }
+  return { cafe, sheet: dateStr, count: entries.length, entries };
+}
+
+function json_(obj) {
+  return ContentService.createTextOutput(JSON.stringify(obj))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+/*************** GET: чтение состояния ***************/
+function getChecklist_(payload) {
+  const cafe = normalizeCafe_(payload.cafe);
+  const dateStr = String(payload.date || "").trim();
+  const filterRole = String(payload.role || "").trim();
+  const filterCat  = String(payload.category || "").trim();
+
+  let ss;
+  if (cafe === "Менеджер") {
+    ss = SpreadsheetApp.openById(SPECIAL_MANAGER_SHEET_ID);
+  } else if (CAFE_SHEETS[cafe]) {
+    ss = SpreadsheetApp.openById(CAFE_SHEETS[cafe]);
+  } else {
+    throw new Error(`Неизвестная кофейня: "${cafe}"`);
+  }
+
+  if (!dateStr) throw new Error("Не передана дата (payload.date)");
+
+  const sh = ss.getSheetByName(dateStr);
+  if (!sh) return { cafe, sheet: dateStr, count: 0, entries: [] };
+
+  ensureHeadersRu_(sh);
+  const lastRow = sh.getLastRow();
+  if (lastRow < DATA_START_ROW) return { cafe, sheet: dateStr, count: 0, entries: [] };
+
+  const values = sh.getRange(DATA_START_ROW, 1, lastRow - DATA_START_ROW + 1, RU_HEADERS.length).getValues();
+  const tz = Session.getScriptTimeZone();
+
+  const entries = [];
+  for (let i = 0; i < values.length; i++) {
+    const row = DATA_START_ROW + i;
+    const [time, role, cat, item, photo, comment, status, performer, itemId, fio] = values[i];
+
+    if (filterRole && String(role).trim() !== filterRole) continue;
+    if (filterCat  && String(cat).trim()  !== filterCat)  continue;
+
+    const timeStr =
+      time instanceof Date
+        ? Utilities.formatDate(time, tz, "dd.MM.yyyy HH:mm:ss")
+        : (time ? String(time) : "");
+
+    entries.push({
+      row,
+      timeStr,
+      role,
+      category: cat,
+      itemTitle: item,
+      itemId: itemId || "",
+      photoUrl: photo,
+      comment,
+      status,
+      done: isDone_(status),
+      performedBy: performer,
+      fio: fio || ""
+    });
+  }
+  return { cafe, sheet: dateStr, count: entries.length, entries };
+}
+
+/*************** SAVE: UPSERT ******************/
+function saveChecklistUpsert_(payload) {
+  const lock = LockService.getScriptLock();
+  lock.tryLock(20 * 1000);
+
+  try {
+    const cafe = normalizeCafe_(payload.cafe);
+    const dateStr = String(payload.date || "").trim();
+    if (!cafe) throw new Error("Не передана кофейня (payload.cafe)");
+    if (!dateStr) throw new Error("Не передана дата (payload.date)");
+
+    let ss;
+    let sheetNamePrefix = "";
+
+    if (cafe === "Менеджер" || payload.isSpecialManager) {
+      ss = SpreadsheetApp.openById(SPECIAL_MANAGER_SHEET_ID);
+      sheetNamePrefix = "Manager_"; // вкладки будут типа Manager_20.01.2026
+    } else if (CAFE_SHEETS[cafe]) {
+      ss = SpreadsheetApp.openById(CAFE_SHEETS[cafe]);
+    } else {
+      throw new Error(`Неизвестная кофейня: "${cafe}"`);
+    }
+
+    const sh = getOrCreateSheet_(ss, sheetNamePrefix + dateStr);
+    ensureHeadersRu_(sh);
+
+    const fallbackUser = payload.login || "";
+    const now = new Date();
+
+    const items = Array.isArray(payload.entries) ? payload.entries : [];
+    if (!items.length) return { cafe, sheet: dateStr, total: 0, updated: 0, appended: 0 };
+
+    const existing = readExistingMap_(sh);
+
+    let updated = 0, appended = 0;
+    const toAppend = [];
+
+    for (const entry of items) {
+      const role       = firstNonEmpty_(entry.role, "");
+      const category   = firstNonEmpty_(entry.category, entry.section, "");
+      const item       = firstNonEmpty_(entry.itemTitle, entry.item, "");
+      const comment    = firstNonEmpty_(entry.comment, "");
+      const performer  = firstNonEmpty_(entry.performedBy, entry.user, fallbackUser, "");
+      const status     = normalizeStatus_(entry.hasOwnProperty("status") ? entry.status : entry.value);
+      const itemId     = firstNonEmpty_(entry.itemId, "");
+      const photoRequired = firstNonEmpty_(entry.photoRequired, "НЕТ");
+      const fio        = firstNonEmpty_(entry.fio, "");
+
+      let photoUrl = firstNonEmpty_(entry.photoUrl, "");
+      if (!photoUrl && PHOTO_FOLDER_ID && entry.photoBase64) {
+        try {
+          photoUrl = saveBase64Photo_(entry.photoBase64, `${dateStr}_${cafe}_${safeFilePart_(item) || "item"}`);
+        } catch (_) { photoUrl = ""; }
+      }
+
+      // Обязательное фото
+      if (status === STATUS_TRUE && photoRequired === "ДА" && !photoUrl) {
+        throw new Error(`Обязательное фото отсутствует для пункта: "${item}"`);
+      }
+
+      const key = makeKey_(role, category, item);
+      const was = existing[key];
+
+      if (was) {
+        sh.getRange(was.row, 1).setValue(now);
+        sh.getRange(was.row, 5).setValue(photoUrl);
+        sh.getRange(was.row, 6).setValue(comment);
+        sh.getRange(was.row, 7).setValue(status);
+        sh.getRange(was.row, 8).setValue(performer);
+        sh.getRange(was.row, 9).setValue(itemId);
+        sh.getRange(was.row, 10).setValue(fio);
+        updated++;
+      } else {
+        toAppend.push([ now, role, category, item, photoUrl, comment, status, performer, itemId, fio ]);
+        appended++;
+      }
+    }
+
+    if (toAppend.length) {
+      const startRow = Math.max(sh.getLastRow() + 1, DATA_START_ROW);
+      sh.getRange(startRow, 1, toAppend.length, RU_HEADERS.length).setValues(toAppend);
+      applyTimeFormatOnce_(sh);
+    }
+
+    // Логируем сохранение с правильным пользователем
+    const saveUser = fallbackUser || "неизвестно";
+    logAction_(cafe, saveUser, "СОХРАНЕНИЕ ЧЕК-ЛИСТА", `Пунктов: ${items.length}, фото: ${items.filter(e => e.photoUrl).length}`);
+
+    return { cafe, sheet: dateStr, total: items.length, updated, appended };
+  } catch (err) {
+    logAction_(payload.cafe || "неизвестно", payload.user || "неизвестно", "ОШИБКА СОХРАНЕНИЯ", err.message);
+    return { ok: false, error: err.message || "Ошибка при сохранении" };
+  } finally {
+    try { lock.releaseLock(); } catch (_) {}
+  }
+}
+/*************** UPLOAD (standalone) ***************/
+function uploadPhoto_(payload) {
+  const folderId = String(payload.folderId || PHOTO_FOLDER_ID || "").trim();
+  if (!folderId) throw new Error("PHOTO_FOLDER_ID is not set");
+
+  const base64In = String(payload.base64 || payload.photoBase64 || "");
+  if (!base64In) throw new Error("no base64");
+
+  const fileName = String(payload.fileName || `photo_${Date.now()}.jpg`);
+  const mime = String(payload.mime || "image/jpeg");
+
+  const base64 = base64In.indexOf(",") >= 0 ? base64In.split(",").pop() : base64In;
+  const bytes = Utilities.base64Decode(base64);
+  const blob = Utilities.newBlob(bytes, mime, fileName);
+
+  const folder = DriveApp.getFolderById(folderId);
+  const file = folder.createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+
+  const id = file.getId();
+  const viewUrl = `https://drive.google.com/uc?export=view&id=${id}`;
+
+  logAction_(payload.cafe || "неизвестно", payload.user || "неизвестно", "ЗАГРУЗКА ФОТО", fileName);
+
+  return { ok: true, viewUrl, id, fileName };
+}
+
+/************* HELPERS ***********/
+function normalizeCafe_(name) {
+  if (!name) return "";
+  const decoded = safeDecode_(String(name).trim());
+  return decoded.replace(/\s+/g, " ");
+}
+
+function safeDecode_(v) { try { return decodeURIComponent(v); } catch { return v; } }
+
+function firstNonEmpty_(...vals) { 
+  for (const v of vals) if (v !== undefined && v !== null && String(v).trim() !== "") return v; 
+  return ""; 
+}
+
+function getOrCreateSheet_(ss, name) {
+  let sh = ss.getSheetByName(name);
+  if (!sh && CREATE_SHEET_IF_MISSING) sh = ss.insertSheet(name);
+  if (!sh) throw new Error(`Лист "${name}" не найден`);
+  return sh;
+}
+
+function ensureHeadersRu_(sheet) {
+  const rng = sheet.getRange(HEADER_ROW, 1, 1, RU_HEADERS.length);
+  const current = rng.getValues()[0];
+  let changed = false;
+  for (let i = 0; i < RU_HEADERS.length; i++) {
+    if (current[i] !== RU_HEADERS[i]) {
+      current[i] = RU_HEADERS[i];
+      changed = true;
+    }
+  }
+  if (changed) rng.setValues([current]);
+}
+
+function normalizeStatus_(val) {
+  const t = typeof val;
+  if (t === "boolean") return val ? STATUS_TRUE : STATUS_FALSE;
+  if (t === "number")  return val ? STATUS_TRUE : STATUS_FALSE;
+  if (t === "string") {
+    const s = val.trim().toLowerCase();
+    if (["true","yes","да","ok","ок","выполнено","1","✔","✅"].includes(s)) return STATUS_TRUE;
+    if (["false","no","нет","не выполнено","0","✖","❌"].includes(s))      return STATUS_FALSE;
+    return val;
+  }
+  if (val == null) return "";
+  return String(val);
+}
+
+function isDone_(status) {
+  const s = normalizeStatus_(status);
+  return String(s).trim().toLowerCase() === STATUS_TRUE.toLowerCase()
+         || ["ok","✔","✅"].includes(String(status).trim().toLowerCase());
+}
+
+function saveBase64Photo_(dataUrl, baseName) {
+  const m = /^data:(.+);base64,(.+)$/i.exec(dataUrl || "");
+  const mime = m ? m[1] : "image/jpeg";
+  const bytes = Utilities.base64Decode(m ? m[2] : dataUrl);
+  const blob = Utilities.newBlob(bytes, mime, baseName);
+  const folder = DriveApp.getFolderById(PHOTO_FOLDER_ID);
+  const file = folder.createFile(blob);
+  file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  const id = file.getId();
+  return `https://drive.google.com/uc?export=view&id=${id}`;
+}
+
+function safeFilePart_(s) { return String(s || "").replace(/[\\\/:*?"<>|#\[\]\n\r\t]+/g, "_").slice(0, 120); }
+
+function readExistingMap_(sheet) {
+  const last = sheet.getLastRow();
+  const map = {};
+  if (last < DATA_START_ROW) return map;
+  const vals = sheet.getRange(DATA_START_ROW, 1, last - DATA_START_ROW + 1, RU_HEADERS.length).getValues();
+  for (let i = 0; i < vals.length; i++) {
+    const row = DATA_START_ROW + i;
+    const [time, role, cat, item] = vals[i];
+    map[makeKey_(role, cat, item)] = { row, role, cat, item };
+  }
+  return map;
+}
+
+function makeKey_(role, category, item) {
+  const norm = s => String(s || "").trim().toLowerCase();
+  return `${norm(role)}::${norm(category)}::${norm(item)}`;
+}
+
+function applyTimeFormatOnce_(sheet) {
+  const r1 = Math.max(DATA_START_ROW, 2);
+  const count = Math.max(1, sheet.getLastRow() - r1 + 1);
+  sheet.getRange(r1, 1, count, 1).setNumberFormat("dd.mm.yyyy hh:mm:ss");
+}
+
+// Проверка выполнения специального чек-листа за сегодня
+function checkSpecialChecklistStatus(payload) {
+  try {
+    const cafe = payload.cafe;
+    const checklistType = payload.checklistType; // "reports" или "cleaning"
+    const todayStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "dd.MM.yyyy");
+
+    if (!cafe || !checklistType) return { ok: false, error: "Недостаточно данных" };
+
+    let ss;
+    if (cafe === "Менеджер" || payload.isSpecialManager) {
+      ss = SpreadsheetApp.openById(SPECIAL_MANAGER_SHEET_ID);
+    } else {
+      ss = SpreadsheetApp.openById(CAFE_SHEETS[cafe]);
+    }
+
+    const sheet = ss.getSheetByName(todayStr);
+    if (!sheet) return { ok: true, completed: false }; // нет листа — не выполнен
+
+    const data = sheet.getDataRange().getValues();
+    if (data.length < 2) return { ok: true, completed: false };
+
+    const headers = data[0];
+    const roleIdx = headers.indexOf("Роль");
+    const categoryIdx = headers.indexOf("Категория");
+    const statusIdx = headers.indexOf("Статус");
+
+    if (roleIdx === -1 || categoryIdx === -1 || statusIdx === -1) {
+      return { ok: false, error: "Не найдены колонки" };
+    }
+
+    let total = 0;
+    let completed = 0;
+
+    data.slice(1).forEach(row => {
+      const role = row[roleIdx];
+      const category = row[categoryIdx];
+      const status = row[statusIdx];
+
+      if (role === "Менеджер" && category.toLowerCase().includes(checklistType.toLowerCase())) {
+        total++;
+        if (status === STATUS_TRUE) completed++;
+      }
+    });
+
+    return { ok: true, completed: total > 0 && completed === total };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  }
+}

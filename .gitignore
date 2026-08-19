@@ -1,2 +1,3 @@
 app/otchety/kassy1
 .nextignore
+/generated/prisma
